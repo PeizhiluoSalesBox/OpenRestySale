@@ -1,6 +1,6 @@
 #Dockerfile
-FROM salesbox/openrestybase:v0.01
-#FROM daocloud.io/peizhiluo007/openresty:latest
+#FROM salesbox/openrestybase:v0.01
+FROM daocloud.io/peizhiluo007/salesbox-openresty:latest
 MAINTAINER peizhiluo007<25159673@qq.com>
 
 #采用supervisor来管理多任务
