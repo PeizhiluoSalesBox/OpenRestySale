@@ -820,6 +820,13 @@ function do_payresult(jreq)
 	    return false,"do_opendoor,invalid args"
 	end
     local salebox = jreq["DDIP"]["Body"]["SalesBox"]
+    --获取设备状态
+    local status,_,_,recordid = get_salebox_status(salebox)
+    if not status then
+        ngx.log(ngx.ERR, "get_salebox_status failed!")
+        return false,"get_salebox_status failed!"
+    end
+    local record_key = "salesbox:"..salebox..":record:"..recordid
     
     --创建redis操作句柄
     local opt = {["redis_ip"]=redis_ip,["redis_port"]=redis_port,["timeout"]=3}
