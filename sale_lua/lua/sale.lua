@@ -45,8 +45,6 @@ local script_utils = require("common_lua.script_utils")
 --[基本变量参数]
 local redis_ip = nil
 local redis_port = 6379
-local accessserver_addr = nil
-local accessserver_port = 8000
 
 --发送应答数据报
 local function send_resp_table (status,resp)
@@ -110,23 +108,44 @@ local function get_request_param()
     return req_body, "success"
 end
 
+--获取salebox的接入服务的地址信息
+local function get_salebox_accessserver(salebox)
+	--
+    local opt = {["redis_ip"]=redis_ip,["redis_port"]=redis_port,["timeout"]=3}
+	local red_handler = redis_iresty:new(opt)
+	if not red_handler then
+	    ngx.log(ngx.ERR, "redis_iresty:new red_handler failed")
+		return false,"redis_iresty:new red_handler failed"
+	end
+    --
+    local carame11_key = "salesbox:"..salebox..":carame:11:status"
+    local carame11_status, err = red_handler:hmget(carame11_key,"AccessServerAddr","AccessServerPort")
+    if not carame11_status then
+	    ngx.log(ngx.ERR, "get carame11_status failed : ", carame11_key,err,redis_ip)
+		return false,"get carame11_status failed"
+	end
+    return carame11_status[1],tonumber(carame11_status[2])
+end
+
 --向服务程序发送分析请求
 local function send_to_accessserver(salebox,reqmsg,reqbody)
-    --解释一下的域名
-	local host_ip,err = wanip_iresty.getdomainip(accessserver_addr)
-	if not host_ip then
-        ngx.log(ngx.ERR,"getdomainip failed ",err,accessserver_addr)
-        return false,"getdomainip failed"
+    
+    --从Redis中获取AccessServer的地址信息
+    local server_addr,server_port = get_salebox_accessserver(salebox)
+    if not server_addr then
+        ngx.log(ngx.ERR,"get_salebox_accessserver failed ",err,server_addr)
+        return false,"get_salebox_accessserver failed"
     end
+
     --连接接入服务器
     local httpc = http_iresty.new()
     httpc:set_timeout(3000)
-	local ok, err = httpc:connect(host_ip,accessserver_port)
+	local ok, err = httpc:connect(server_addr,server_port)
 	if not ok  then
-		ngx.log(ngx.ERR,"httpc:connect failed ",host_ip,err)
-		return false,"httpc:connect failed "..host_ip
+		ngx.log(ngx.ERR,"httpc:connect failed ",server_addr,err)
+		return false,"httpc:connect failed "..server_addr
 	end
-    
+
     --构造请求包
 	local jreq = {}
 	jreq["DDIP"] = {}
@@ -873,7 +892,7 @@ function do_payresult(jreq)
 	jrsp["DDIP"]["Header"] = {}
 	jrsp["DDIP"]["Header"]["Version"] = "1.0"
 	jrsp["DDIP"]["Header"]["CSeq"] = "1"
-	jrsp["DDIP"]["Header"]["MessageType"] = "MSG_PAY_RESULT_NOTICE"
+	jrsp["DDIP"]["Header"]["MessageType"] = "MSG_PAY_RESULT_ACK"
 	jrsp["DDIP"]["Header"]["ErrorNum"] = "200"
 	jrsp["DDIP"]["Header"]["ErrorString"] = "Success OK"
 	send_resp_table(ngx.HTTP_OK,jrsp)
@@ -944,16 +963,6 @@ local function load_ip_addr()
     redis_port = ngx.shared.shared_data:get("RedisPort")
 	if redis_port == nil  then
 		ngx.log(ngx.ERR,"get RedisPort failed ")
-        return false
-	end
-    accessserver_addr = ngx.shared.shared_data:get("AccessServerAddr")
-	if accessserver_addr == nil  then
-		ngx.log(ngx.ERR,"get AccessServerAddr failed ")
-        return false
-	end
-    accessserver_port = ngx.shared.shared_data:get("AccessServerPort")
-	if accessserver_port == nil  then
-		ngx.log(ngx.ERR,"get AccessServerPort failed ")
         return false
 	end
 	return true
