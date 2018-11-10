@@ -11,7 +11,7 @@
 ]]
 
 -----------------设计思路-----------------
---[[状态机驱动:"Free|Selecting|Paying"]]
+--[[状态机驱动:"Free|Opening|Selecting|Paying"]]
 --[[
 Free:【稳态】
     a>开门请求->[序列操作成功]->Selecting
@@ -98,9 +98,11 @@ local function get_request_param()
         or not req_body["DDIP"]["Header"]["CSeq"]
         or not req_body["DDIP"]["Header"]["MessageType"]
         or not req_body["DDIP"]["Body"]
+        or not req_body["DDIP"]["Body"]["SalesBox"]
         or type(req_body["DDIP"]["Header"]["Version"]) ~= "string"
         or type(req_body["DDIP"]["Header"]["CSeq"]) ~= "string"
         or type(req_body["DDIP"]["Header"]["MessageType"]) ~= "string"
+        or type(req_body["DDIP"]["Body"]["SalesBox"]) ~= "string"
 		then
         ngx.log(ngx.ERR, "invalid args")
         return nil, "invalid protocol format args"
@@ -409,12 +411,14 @@ function do_status_check(salebox,request_type)
     
     --异常状态恢复
     if (status == "Opening") and (ngx.now() >= statustime+15) then 
+        --有可能设备程序工作异常,不识别了。
         ngx.log(ngx.ERR, "Opening Timeout,Reset to Free;salebox=", salebox)
         set_salebox_status(salebox,"Free",ngx.now(),"000","000")
         status = "Free"
     end
     if (status == "Paying") and (ngx.now() >= statustime+30) then 
         -->产生一条异常流水记录
+        --有可能是再支付状态下小程序直接异常退出
         local ok, err = unpay_record_salebox(salebox)
         if not ok then
             ngx.log(ngx.ERR, "unpay_record_salebox failed : ", salebox_key,err)
@@ -425,6 +429,7 @@ function do_status_check(salebox,request_type)
     end
     if (status == "Selecting") and (ngx.now() >= statustime+30) then 
         --在购物状态下,有30秒没有收到设备的识别消息(此时设备关门了)
+        --有可能是设备门坏了打不开导致的
         local ret = check_salebox_camera_close(salebox)
         if ret == true then
             ngx.log(ngx.ERR, "Selecting Timeout,Reset to Free;salebox=", salebox)
@@ -471,12 +476,10 @@ end
 --处理识别消息
 function do_recognize(jreq)
 	--判断命令格式的有效性
-	if not jreq["DDIP"]["Body"]["SalesBox"]
-        or not jreq["DDIP"]["Body"]["Camera"]
+	if not jreq["DDIP"]["Body"]["Camera"]
         or not jreq["DDIP"]["Body"]["DoorStatus"]
         or not jreq["DDIP"]["Body"]["Objects"]
-		or type(jreq["DDIP"]["Body"]["SalesBox"]) ~= "string"
-        or type(jreq["DDIP"]["Body"]["Camera"]) ~= "string"
+		type(jreq["DDIP"]["Body"]["Camera"]) ~= "string"
         or type(jreq["DDIP"]["Body"]["DoorStatus"]) ~= "string"
     then
 	    ngx.log(ngx.ERR, "do_recognize,invalid args")
@@ -556,16 +559,14 @@ end
 --处理小程序发来的开门请求
 function do_opendoor(jreq)
 	--判断命令格式的有效性
-	if not jreq["DDIP"]["Body"]["SalesBox"]
-        or not jreq["DDIP"]["Body"]["Operator"]
-		or type(jreq["DDIP"]["Body"]["SalesBox"]) ~= "string"
-        or type(jreq["DDIP"]["Body"]["Operator"]) ~= "string"
+	if not jreq["DDIP"]["Body"]["Operator"]
+		or type(jreq["DDIP"]["Body"]["Operator"]) ~= "string"
 		then
 	    ngx.log(ngx.ERR, "do_opendoor,invalid args")
 	    return false,"do_opendoor,invalid args"
 	end
     local salebox = jreq["DDIP"]["Body"]["SalesBox"]
-          
+
     --创建redis操作句柄
     local opt = {["redis_ip"]=redis_ip,["redis_port"]=redis_port,["timeout"]=3}
 	local red_handler = redis_iresty:new(opt)
@@ -594,7 +595,7 @@ function do_opendoor(jreq)
     
     --<3>给接入服务器发送识别请求
     local reqbody = {}
-    reqbody["SalesBox"] = jreq["DDIP"]["Body"]["SalesBox"]
+    reqbody["SalesBox"] = salebox
 	reqbody["RecordID"] = recordid
     local ok = send_to_accessserver(jreq["DDIP"]["Body"]["SalesBox"],"MSG_RECOGNIZE_REQ",reqbody)
     if ok ~= true then
@@ -603,7 +604,7 @@ function do_opendoor(jreq)
         ngx.log(ngx.ERR, "send_to_accessserver MSG_RECOGNIZE_REQ failed")
         return false,"send_to_accessserver MSG_RECOGNIZE_REQ failed"
     end
-    
+
     --<4>等待所有camera的初始识别完成
     local ok,err = check_salebox_camera_recognize(salebox,"Begin:",15)
     if(ok ~= true) then
@@ -615,7 +616,7 @@ function do_opendoor(jreq)
 
     --<5>给接入服务器发送开门请求
     local reqbody = {}
-    reqbody["SalesBox"] = jreq["DDIP"]["Body"]["SalesBox"]
+    reqbody["SalesBox"] = salebox
     local ok = send_to_accessserver(jreq["DDIP"]["Body"]["SalesBox"],"MSG_OPENDOOR_REQ",reqbody)
     if ok ~= true then
         --恢复状态
@@ -632,7 +633,7 @@ function do_opendoor(jreq)
         ngx.log(ngx.ERR, "hmset Record Status to Selecting failed", err)
         return false,"hmset Record Status to Selecting  failed"
     end
-    
+
     --<7>给小程序应答
 	local jrsp = {}
 	jrsp["DDIP"] = {}
@@ -674,12 +675,6 @@ end
 --获取购物列表
 function do_buyinfo(jreq)
 	--判断命令格式的有效性
-	if not jreq["DDIP"]["Body"]["SalesBox"]
-		or type(jreq["DDIP"]["Body"]["SalesBox"]) ~= "string"
-		then
-	    ngx.log(ngx.ERR, "do_opendoor,invalid args")
-	    return false,"do_opendoor,invalid args"
-	end
     local salebox = jreq["DDIP"]["Body"]["SalesBox"]
     
     --创建redis操作句柄
@@ -689,7 +684,7 @@ function do_buyinfo(jreq)
 	    ngx.log(ngx.ERR, "redis_iresty:new red_handler failed")
 		return false,"redis_iresty:new red_handler failed"
 	end
-    
+
     --根据[购物流程梳理2]
     --1>判断所有camera的结束识别是否完成。
     local prefix = "Mid:"    
@@ -907,17 +902,7 @@ function process_msg()
 		send_resp_string(ngx.HTTP_BAD_REQUEST,"any",err);
 	    return
 	end
-    
     --状态校验
-    if not jreq["DDIP"]
-        or not jreq["DDIP"]["Header"]
-        or not jreq["DDIP"]["Body"]
-        or not jreq["DDIP"]["Header"]["MessageType"]
-        or not jreq["DDIP"]["Body"]["SalesBox"] 
-    then
-        send_resp_string(ngx.HTTP_BAD_REQUEST,"any","invalid message format");
-	    return
-	end
     local salebox = jreq["DDIP"]["Body"]["SalesBox"]
     local request_type = jreq["DDIP"]["Header"]["MessageType"]
     local ok,err = do_status_check(salebox,request_type)
@@ -927,15 +912,15 @@ function process_msg()
 	end
 
 	--分命令处理
-	if (request_type == "MSG_RECOGNIZE_NOTICE") then
-		local ok, err = do_recognize(jreq);
-		if not ok then
-			send_resp_string(ngx.HTTP_BAD_REQUEST,"MSG_RECOGNIZE_ACK",err);
-		end
-	elseif (request_type == "MSG_OPENDOOR_REQ") then
+    if (request_type == "MSG_OPENDOOR_REQ") then
 		local ok, err = do_opendoor(jreq);
 		if not ok then
 			send_resp_string(ngx.HTTP_BAD_REQUEST,"MSG_OPENDOOR_RSP",err);
+		end
+	elseif (request_type == "MSG_RECOGNIZE_NOTICE") then
+		local ok, err = do_recognize(jreq);
+		if not ok then
+			send_resp_string(ngx.HTTP_BAD_REQUEST,"MSG_RECOGNIZE_ACK",err);
 		end
 	elseif (request_type == "MSG_BUY_INFO_REQ") then
 		local ok, err = do_buyinfo(jreq);
